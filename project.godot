@@ -1,22 +1,413 @@
-; Engine configuration file.
-; It's best edited using the editor UI and not directly,
-; since the parameters that go here are not all obvious.
-;
-; Format:
-;   [section] ; section goes between []
-;   param=value ; assign values to parameters
+extends Node2D
 
-config_version=5
+signal note_played(note_name, frequency)
 
-[application]
+const SAMPLE_RATE: int = 44100
+const NOTE_TIME: float = 0.42
 
-config/name="Black Stripe Bass Presentation Ready"
-run/main_scene="res://scenes/Main.tscn"
-config/features=PackedStringArray("4.6", "Forward Plus")
-config/icon="res://icon.svg"
+var riff: Array = ["E", "E", "G", "E", "D", "C", "B"]
+var riff_index: int = 0
 
-[display]
+var practice_mode: bool = true
+var auto_playing: bool = false
 
-window/size/viewport_width=1280
-window/size/viewport_height=720
-window/stretch/mode="canvas_items"
+var distortion: float = 0.35
+var current_light_color: Color = Color(1.0, 0.1, 0.08)
+var light_power: float = 0.0
+var light_flash_size: float = 0.0
+var last_note: String = "None"
+
+var string_phase: Array = [0.0, 0.0, 0.0, 0.0]
+var string_power: Array = [0.0, 0.0, 0.0, 0.0]
+
+var title_label: Label
+var instruction_label: Label
+var mode_label: Label
+var riff_label: Label
+var status_label: Label
+var distortion_label: Label
+
+var note_freqs: Dictionary = {
+	"E": 82.41,
+	"G": 98.00,
+	"D": 73.42,
+	"C": 65.41,
+	"B": 61.74,
+	"LOW_G": 49.00,
+	"LOW_A": 55.00
+}
+
+var note_colours: Dictionary = {
+	"E": Color(1.0, 0.08, 0.06),
+	"G": Color(0.05, 1.0, 0.22),
+	"D": Color(0.12, 0.45, 1.0),
+	"C": Color(1.0, 0.88, 0.08),
+	"B": Color(0.72, 0.18, 1.0),
+	"LOW_G": Color(0.0, 0.85, 0.95),
+	"LOW_A": Color(1.0, 0.45, 0.08)
+}
+
+var note_strings: Dictionary = {
+	"E": 0,
+	"G": 0,
+	"D": 0,
+	"C": 0,
+	"B": 0,
+	"LOW_G": 1,
+	"LOW_A": 1
+}
+
+func _ready() -> void:
+	create_ui()
+	create_audio_effect()
+	update_labels()
+	queue_redraw()
+
+func create_audio_effect() -> void:
+	var bus_index: int = AudioServer.get_bus_index("Master")
+	var effect: AudioEffectDistortion = AudioEffectDistortion.new()
+	effect.mode = AudioEffectDistortion.MODE_CLIP
+	effect.drive = distortion
+	effect.pre_gain = 1.0
+	effect.post_gain = 0.55
+	AudioServer.add_bus_effect(bus_index, effect, 0)
+
+func create_ui() -> void:
+	title_label = Label.new()
+	title_label.text = "BLACK STRIPE BASS"
+	title_label.position = Vector2(40, 24)
+	title_label.add_theme_font_size_override("font_size", 34)
+	add_child(title_label)
+
+	instruction_label = Label.new()
+	instruction_label.text = "1 = Practice Mode   2 = Performance Mode Auto Riff   |   Practice: A A S A D F G = E E G E D C B   |   H = Low G   J = Low A   |   +/- distortion"
+	instruction_label.position = Vector2(40, 72)
+	instruction_label.add_theme_font_size_override("font_size", 17)
+	add_child(instruction_label)
+
+	mode_label = Label.new()
+	mode_label.position = Vector2(40, 108)
+	mode_label.add_theme_font_size_override("font_size", 22)
+	add_child(mode_label)
+
+	distortion_label = Label.new()
+	distortion_label.position = Vector2(40, 604)
+	distortion_label.add_theme_font_size_override("font_size", 18)
+	add_child(distortion_label)
+
+	riff_label = Label.new()
+	riff_label.position = Vector2(40, 638)
+	riff_label.add_theme_font_size_override("font_size", 22)
+	add_child(riff_label)
+
+	status_label = Label.new()
+	status_label.position = Vector2(875, 638)
+	status_label.add_theme_font_size_override("font_size", 22)
+	add_child(status_label)
+
+func update_labels() -> void:
+	var visible_riff: String = ""
+	var i: int = 0
+	while i < riff.size():
+		var note_text: String = str(riff[i])
+		if i == riff_index:
+			visible_riff += "[" + note_text + "] "
+		else:
+			visible_riff += note_text + " "
+		i += 1
+
+	if practice_mode:
+		mode_label.text = "MODE: PRACTICE - play manually with the keyboard"
+	else:
+		mode_label.text = "MODE: PERFORMANCE - automatic Seven Nation Army bass sequence"
+
+	riff_label.text = "Practice guide: " + visible_riff
+	status_label.text = "Last note: " + last_note
+	distortion_label.text = "Distortion/drive: " + str(int(round(distortion * 100.0))) + "%"
+
+func _input(event: InputEvent) -> void:
+	if event is InputEventKey:
+		var key_event: InputEventKey = event
+		if key_event.pressed and not key_event.echo:
+			if key_event.keycode == KEY_1:
+				practice_mode = true
+				auto_playing = false
+				update_labels()
+				return
+
+			elif key_event.keycode == KEY_2:
+				practice_mode = false
+				update_labels()
+				play_auto_performance()
+				return
+
+			elif key_event.keycode == KEY_EQUAL or key_event.keycode == KEY_PLUS:
+				change_distortion(0.08)
+				return
+
+			elif key_event.keycode == KEY_MINUS:
+				change_distortion(-0.08)
+				return
+
+			if practice_mode:
+				if key_event.keycode == KEY_A:
+					play_bass_note("E")
+				elif key_event.keycode == KEY_S:
+					play_bass_note("G")
+				elif key_event.keycode == KEY_D:
+					play_bass_note("D")
+				elif key_event.keycode == KEY_F:
+					play_bass_note("C")
+				elif key_event.keycode == KEY_G:
+					play_bass_note("B")
+				elif key_event.keycode == KEY_H:
+					play_bass_note("LOW_G")
+				elif key_event.keycode == KEY_J:
+					play_bass_note("LOW_A")
+
+func change_distortion(amount: float) -> void:
+	distortion = clamp(distortion + amount, 0.0, 1.0)
+
+	var bus_index: int = AudioServer.get_bus_index("Master")
+	if AudioServer.get_bus_effect_count(bus_index) > 0:
+		var effect: AudioEffect = AudioServer.get_bus_effect(bus_index, 0)
+		if effect is AudioEffectDistortion:
+			var dist_effect: AudioEffectDistortion = effect
+			dist_effect.drive = distortion
+
+	update_labels()
+
+func play_bass_note(note_name: String) -> void:
+	if not note_freqs.has(note_name):
+		return
+
+	var freq: float = float(note_freqs[note_name])
+	var note_colour: Color = note_colours[note_name]
+	var string_id: int = int(note_strings[note_name])
+
+	last_note = note_name
+	current_light_color = note_colour
+	light_power = 1.0
+	light_flash_size = 1.0
+	string_power[string_id] = 1.0
+
+	if practice_mode:
+		if note_name == str(riff[riff_index]):
+			riff_index += 1
+			if riff_index >= riff.size():
+				riff_index = 0
+
+	play_generated_bass(freq)
+	emit_signal("note_played", note_name, freq)
+	update_labels()
+	queue_redraw()
+
+func play_auto_performance() -> void:
+	if auto_playing:
+		return
+
+	auto_playing = true
+
+	var section_one: Array = ["E", "E", "G", "E", "D", "C", "B"]
+	var section_three: Array = ["E", "E", "G", "E", "D", "C", "D", "C", "B"]
+	var full_sequence: Array = []
+
+	add_sequence(full_sequence, section_one)
+	add_sequence(full_sequence, section_one)
+	add_sequence(full_sequence, section_three)
+	add_sequence(full_sequence, section_one)
+
+	var i: int = 0
+	while i < 8:
+		full_sequence.append("LOW_G")
+		i += 1
+
+	i = 0
+	while i < 8:
+		full_sequence.append("LOW_A")
+		i += 1
+
+	while not practice_mode:
+		i = 0
+		while i < full_sequence.size():
+			if practice_mode:
+				auto_playing = false
+				return
+
+			play_bass_note(str(full_sequence[i]))
+			await get_tree().create_timer(0.45).timeout
+			i += 1
+
+	auto_playing = false
+
+func add_sequence(target: Array, source: Array) -> void:
+	var i: int = 0
+	while i < source.size():
+		target.append(source[i])
+		i += 1
+
+func play_generated_bass(freq: float) -> void:
+	var player: AudioStreamPlayer = AudioStreamPlayer.new()
+	add_child(player)
+
+	var stream: AudioStreamGenerator = AudioStreamGenerator.new()
+	stream.mix_rate = SAMPLE_RATE
+	stream.buffer_length = 0.6
+	player.stream = stream
+	player.volume_db = -5.0
+	player.play()
+
+	var playback: AudioStreamGeneratorPlayback = player.get_stream_playback()
+	var frames: int = int(float(SAMPLE_RATE) * NOTE_TIME)
+	var i: int = 0
+
+	while i < frames:
+		var t: float = float(i) / float(SAMPLE_RATE)
+		var attack: float = clamp(t / 0.025, 0.0, 1.0)
+		var decay: float = exp(-4.0 * t)
+		var envelope: float = attack * decay
+
+		var sine_wave: float = sin(TAU * freq * t)
+		var tone_factor: float = clamp(freq / 100.0, 0.3, 1.0)
+		var harmonic: float = 0.35 * tone_factor * sin(TAU * freq * 2.0 * t)
+		var grit_source: float = sin(TAU * freq * t)
+		var grit: float = 0.0
+
+		if grit_source >= 0.0:
+			grit = 0.20
+		else:
+			grit = -0.20
+
+		var sample: float = (sine_wave + harmonic + grit * distortion) * envelope * 0.45
+		playback.push_frame(Vector2(sample, sample))
+		i += 1
+
+	await get_tree().create_timer(NOTE_TIME + 0.15).timeout
+	if is_instance_valid(player):
+		player.queue_free()
+
+func _process(delta: float) -> void:
+	var i: int = 0
+	while i < string_power.size():
+		string_phase[i] = float(string_phase[i]) + delta * (18.0 + float(i) * 2.0)
+		string_power[i] = max(0.0, float(string_power[i]) - delta * 2.7)
+		i += 1
+
+	light_power = max(0.0, light_power - delta * 1.2)
+	light_flash_size = max(0.0, light_flash_size - delta * 2.0)
+	queue_redraw()
+
+func _draw() -> void:
+	draw_background()
+	draw_stage_lights()
+	draw_bass_body()
+	draw_strings()
+	draw_keys()
+
+func draw_background() -> void:
+	var size: Vector2 = get_viewport_rect().size
+	draw_rect(Rect2(Vector2.ZERO, size), Color(0.02, 0.02, 0.025), true)
+
+	var x: int = 0
+	while x < 1280:
+		draw_line(Vector2(x, 0), Vector2(x + 180, 720), Color(0.08, 0.08, 0.09), 2.0)
+		x += 80
+
+func draw_stage_lights() -> void:
+	var c: Color = current_light_color
+	c.a = 0.15 + light_power * 0.55
+
+	draw_circle(Vector2(260, 170), 140.0 + light_power * 110.0 + light_flash_size * 50.0, c)
+	draw_circle(Vector2(640, 165), 170.0 + light_power * 130.0 + light_flash_size * 60.0, c)
+	draw_circle(Vector2(1020, 170), 140.0 + light_power * 110.0 + light_flash_size * 50.0, c)
+
+	var beam: Color = current_light_color
+	beam.a = 0.25 + light_power * 0.38
+
+	var beam_left: PackedVector2Array = PackedVector2Array([Vector2(200, 0), Vector2(330, 0), Vector2(590, 560), Vector2(390, 560)])
+	var beam_right: PackedVector2Array = PackedVector2Array([Vector2(950, 0), Vector2(1080, 0), Vector2(880, 560), Vector2(690, 560)])
+	draw_colored_polygon(beam_left, beam)
+	draw_colored_polygon(beam_right, beam)
+
+func draw_bass_body() -> void:
+	draw_rect(Rect2(230, 270, 760, 60), Color(0.01, 0.01, 0.012), true)
+	draw_rect(Rect2(230, 292, 760, 4), Color(0.9, 0.9, 0.9), true)
+
+	var i: int = 0
+	while i < 12:
+		var fret_x: float = 270.0 + float(i) * 56.0
+		draw_line(Vector2(fret_x, 258), Vector2(fret_x, 342), Color(0.55, 0.55, 0.55), 2.0)
+		i += 1
+
+	draw_circle(Vector2(245, 300), 85.0, Color(0.0, 0.0, 0.0))
+	draw_circle(Vector2(245, 300), 62.0, Color(0.95, 0.95, 0.95))
+	draw_circle(Vector2(245, 300), 42.0, Color(0.0, 0.0, 0.0))
+
+	draw_rect(Rect2(985, 245, 105, 110), Color(0.0, 0.0, 0.0), true)
+	draw_rect(Rect2(998, 260, 78, 80), Color(0.92, 0.92, 0.92), true)
+	draw_rect(Rect2(1012, 274, 50, 52), Color(0.0, 0.0, 0.0), true)
+
+func draw_strings() -> void:
+	var ys: Array = [282.0, 296.0, 310.0, 324.0]
+
+	var i: int = 0
+	while i < ys.size():
+		var points: PackedVector2Array = PackedVector2Array()
+		var step: int = 0
+		while step < 70:
+			var progress: float = float(step) / 69.0
+			var string_x: float = lerp(170.0, 1080.0, progress)
+			var vibration: float = sin(float(step) * 0.7 + float(string_phase[i]) * 10.0) * float(string_power[i]) * 13.0
+			points.append(Vector2(string_x, float(ys[i]) + vibration))
+			step += 1
+
+		var width: float = 2.0 + float(i) * 0.45
+		draw_polyline(points, Color(0.92, 0.92, 0.92), width)
+		i += 1
+
+func draw_keys() -> void:
+	var keys: Array = [
+		["A", "E"],
+		["S", "G"],
+		["D", "D"],
+		["F", "C"],
+		["G", "B"],
+		["H", "Low G"],
+		["J", "Low A"]
+	]
+
+	var i: int = 0
+	while i < keys.size():
+		var key: String = str(keys[i][0])
+		var label: String = str(keys[i][1])
+		var note_name: String = get_note_name_from_key(key)
+		var key_colour: Color = note_colours[note_name]
+
+		var key_x: float = 160.0 + float(i) * 145.0
+		var rect: Rect2 = Rect2(key_x, 430.0, 105.0, 90.0)
+
+		draw_rect(rect, Color(0.04, 0.04, 0.045), true)
+		draw_rect(rect, key_colour, false, 4.0)
+
+		draw_string(ThemeDB.fallback_font, Vector2(key_x + 37.0, 466.0), key, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 34, Color.WHITE)
+		draw_string(ThemeDB.fallback_font, Vector2(key_x + 22.0, 500.0), label, HORIZONTAL_ALIGNMENT_LEFT, -1.0, 20, key_colour)
+
+		i += 1
+
+func get_note_name_from_key(key: String) -> String:
+	if key == "A":
+		return "E"
+	elif key == "S":
+		return "G"
+	elif key == "D":
+		return "D"
+	elif key == "F":
+		return "C"
+	elif key == "G":
+		return "B"
+	elif key == "H":
+		return "LOW_G"
+	elif key == "J":
+		return "LOW_A"
+
+	return "E"
